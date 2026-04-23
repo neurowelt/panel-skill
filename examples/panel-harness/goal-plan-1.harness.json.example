@@ -1,0 +1,47 @@
+{
+  "goal_file": "goal.md",
+  "plan_file": "goal-plan-1.md",
+  "increments": [
+    {
+      "id": "INC1",
+      "name": "Destination",
+      "section": "Increment INC1",
+      "scope": "pick one of Cannon Beach / Monterey / Mendocino for a 3-day first-time-visitor coastal trip; argue against alignment with overall goal",
+      "artifact_name": "recommendation.md",
+      "depends_on": [],
+      "retry_risk": "low",
+      "state": "pending",
+      "first_episode": null,
+      "last_episode": null
+    },
+    {
+      "id": "INC2",
+      "name": "Dates and transport",
+      "section": "Increment INC2",
+      "scope": "given INC1, pick 3 consecutive days (month + rationale) and a door-to-door transport plan; honest travel-time budget",
+      "artifact_name": "dates-and-transport.md",
+      "depends_on": [
+        "INC1"
+      ],
+      "retry_risk": "medium",
+      "state": "pending",
+      "first_episode": null,
+      "last_episode": null
+    },
+    {
+      "id": "INC3",
+      "name": "3-day itinerary",
+      "section": "Increment INC3",
+      "scope": "given INC1+INC2, build day-by-day plan with morning/afternoon/evening, named meals, unstructured blocks, weather fallbacks",
+      "artifact_name": "itinerary.md",
+      "depends_on": [
+        "INC1",
+        "INC2"
+      ],
+      "retry_risk": "low",
+      "state": "pending",
+      "first_episode": null,
+      "last_episode": null
+    }
+  ]
+}

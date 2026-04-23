@@ -1,0 +1,103 @@
+# Plan 1 — breaking the coastal-trip goal into increments
+
+*Plan file for `goal.md`. Three increments, connected. Each scout episode targets one.*
+
+## Plan shape
+
+1. **INC1 — Destination.** Pick the place.
+2. **INC2 — Dates and transport.** Given the destination, pick when and how to get there.
+3. **INC3 — 3-day itinerary.** Given INC1 and INC2, build the day-by-day plan.
+4. ...
+
+Each decision constrains the next.
+
+---
+
+## Increment INC1 — Destination
+
+### What to decide
+
+Pick one of these three coastal destinations:
+
+1. **Cannon Beach, Oregon** — small town, walkable, quiet off-season, iconic rock formations. 90 min from Portland. Rainy risk outside summer.
+2. **Monterey, California** — aquarium, Big Sur access, more infrastructure. 2 hr from SFO. Pricier than Cannon Beach.
+3. **Mendocino, California** — remote, slow-paced, no airport nearby (3 hr from SFO). Best for someone who wants to decompress; worst for someone who wants to tick sights off.
+
+### Definition of done
+
+Recommendation artifact at `harness/episodes/episode-N/recommendation.md`, ≤ 200 words, containing:
+
+- the pick (one sentence)
+- the argument that most moved you
+- the objection you had to overcome
+- the single condition that would reverse the pick
+
+### Alignment check (for the panel skill)
+
+The upstream personas should ask: *does this pick give a first-time visitor a real coastal experience in 3 days without the trip becoming a logistics puzzle?* A pick that's ideal in a vacuum but needs two flights + a rental car is a bad pick here.
+
+### Dependencies
+
+None. First increment.
+
+---
+
+## Increment INC2 — Dates and transport
+
+### What to decide
+
+Given the destination picked in INC1, decide:
+
+- Which 3 consecutive days (name an actual month/season and why)
+- Transport from the visitor's home (treat their home as "a major US city, no car") — plane, train, bus, rental car, or a combination
+
+### Definition of done
+
+Artifact at `harness/episodes/episode-N/dates-and-transport.md`:
+
+- chosen month/season + rationale (weather, crowds, cost)
+- full door-to-door transport plan for both directions
+- honest time budget — how many hours of the 3 days are travel, how many are "on the ground"
+
+### Alignment check (for the panel skill)
+
+Must leave enough on-the-ground time for a meaningful itinerary in INC3. If travel eats more than a third of the 3 days, something's wrong with either A or B.
+
+### Dependencies
+
+A (destination dictates what "reasonable" transport and seasons look like).
+
+---
+
+## Increment INC3 — The 3-day itinerary
+
+### What to decide
+
+Given INC1 and INC2, build a concrete day-by-day plan. For each day: morning, afternoon, evening. Name specific places / activities. Include at least one slow / unstructured block per day.
+
+### Definition of done
+
+Artifact at `harness/episodes/episode-N/itinerary.md`:
+
+- 3-day plan, each day with morning / afternoon / evening
+- one specific named meal per day (restaurant or style of meal)
+- at least one unstructured block per day, labeled as such
+- one "if the weather turns" fallback for each day
+
+### Alignment check (for the panel skill)
+
+Must feel like a break, not a checklist. The upstream personas (modeling the visitor) should be asked: *reading this, do you feel excited or tired?* If the honest answer is tired, the itinerary is wrong even if every item is "nice."
+
+### Dependencies
+
+INC1, INC2.
+
+---
+
+## Increment plan
+
+| Id | Scope | Depends on | Retry risk |
+|---|---|---|---|
+| INC1 | Destination | — | Low |
+| INC2 | Dates and transport | INC1 | Medium — may reveal destination is too hard to get to |
+| INC3 | 3-day itinerary | INC1, INC2 | Low |

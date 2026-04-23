@@ -1,0 +1,5 @@
+.worktrees/
+.private-journal/
+.DS_Store
+.env
+panel_state.json
