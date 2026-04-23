@@ -1,0 +1,20 @@
+{
+  "name": "panel-marketplace",
+  "interface": {
+    "displayName": "Companion Panel"
+  },
+  "plugins": [
+    {
+      "name": "panel",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

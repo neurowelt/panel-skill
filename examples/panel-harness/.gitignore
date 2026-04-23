@@ -1,0 +1,19 @@
+# API keys — matches at any depth (root, or script-local under .claude/skills/panel/)
+.env
+
+# Panel client state (per-working-directory).
+.claude/panel_state.json
+
+# Generated signal files and archived passes — the example ships with an empty
+# episode-1/ (just task.md); everything else is produced by running the harness.
+harness/episodes/*/plan-signal.json
+harness/episodes/*/work-signal.json
+harness/episodes/*/forensics-signal.json
+harness/episodes/*/review-signal.json
+harness/episodes/*/pass-*/
+
+# Worker artifacts live alongside signals inside each episode dir. Recipients
+# will produce their own — uncomment if you want them tracked during dev:
+# harness/episodes/*/*.md
+# harness/episodes/*/*.json
+# (The two lines above are too broad and would ignore task.md — leaving commented.)
