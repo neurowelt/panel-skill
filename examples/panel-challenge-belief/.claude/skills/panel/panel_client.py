@@ -22,10 +22,14 @@ Environment
     PANEL_API_KEY   Required. Generate at Profile -> API Access.
     PANEL_BASE_URL  Optional. Defaults to https://panel.humx.ai.
 
-A ``.env`` next to this script OR at the nearest repo root (first
-ancestor of the current working directory that contains ``.git`` or
-``.claude``) is loaded automatically. Shell env wins; script-local
-``.env`` beats repo-root ``.env``.
+A ``.env`` is loaded automatically from the first of these locations
+that exists (earlier wins; shell env always wins over all files):
+
+    1. next to this script
+    2. nearest repo root (first ancestor of CWD with ``.git`` or ``.claude``)
+    3. ``~/.claude/skills/panel/.env``  (user-global; useful when the skill
+       is installed globally via the marketplace and you don't want to
+       edit files inside the plugin install dir)
 """
 from __future__ import annotations
 
@@ -70,8 +74,10 @@ def _load_dotenv() -> None:
     """Load KEY=VALUE pairs from candidate .env files into os.environ.
 
     Search order (first wins, shell env always wins via the not-in-environ guard):
-      1. <script_dir>/.env  (explicit, per-skill)
-      2. <repo_root>/.env   (repo root = nearest ancestor of cwd with .git/.claude)
+      1. <script_dir>/.env          (explicit, per-skill)
+      2. <repo_root>/.env           (repo root = nearest ancestor of cwd with .git/.claude)
+      3. ~/.claude/skills/panel/.env (user-global; works when the skill is
+                                     installed globally via the marketplace)
     """
     candidates: list[Path] = [Path(__file__).resolve().parent / ".env"]
     repo_root = _find_repo_root(Path.cwd().resolve())
@@ -79,6 +85,9 @@ def _load_dotenv() -> None:
         root_env = repo_root / ".env"
         if root_env not in candidates:
             candidates.append(root_env)
+    user_env = Path.home() / ".claude" / "skills" / "panel" / ".env"
+    if user_env not in candidates:
+        candidates.append(user_env)
 
     for env_path in candidates:
         if not env_path.is_file():
@@ -108,8 +117,11 @@ def _env_api_key() -> str:
     if not key:
         print(
             "error: PANEL_API_KEY is not set.\n"
-            "Generate one at Profile -> API Access and either export it, put it in "
-            "<repo-root>/.env, or put it in .env next to this script.",
+            "Generate one at Profile -> API Access, then either:\n"
+            "  - export PANEL_API_KEY in your shell, or\n"
+            "  - put it in <repo-root>/.env, or\n"
+            "  - put it in .env next to this script, or\n"
+            "  - put it in ~/.claude/skills/panel/.env (user-global).",
             file=sys.stderr,
         )
         sys.exit(2)
