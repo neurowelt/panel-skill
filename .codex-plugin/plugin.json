@@ -1,6 +1,6 @@
 {
   "name": "panel",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Harness skill for the Companion Panel API v1. Multi-persona analysis: ask, debate, explore, challenge, or review a position via panels of personas.",
   "author": {
     "name": "humx.ai",
@@ -24,6 +24,9 @@
     "longDescription": "Harness skill for Companion Panel API v1. Run single-persona answers (ask), two-sided debates (debate), full panel deliberations with main-persona synthesis (explore), pressure-test a held position (challenge), or a review pass. Useful for second opinions, side-by-side takes, and stress-testing arguments.",
     "developerName": "humx.ai",
     "category": "Productivity",
-    "capabilities": ["Read", "Write"]
+    "capabilities": [
+      "Read",
+      "Write"
+    ]
   }
 }
