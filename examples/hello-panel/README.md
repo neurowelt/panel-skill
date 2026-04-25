@@ -94,9 +94,7 @@ If your team has only upstream personas, that's your first adaptation: add a dow
 
 Once the "two independent minds → synthesis" shape feels intuitive, the other demos show what you do with it:
 
-- `panel-challenge-belief/` — adversarial pressure on a held belief, structured verdict (`challenge`)
-- `panel-debate-options/` — prospective deliberation between two live options (`debate`)
-- `panel-audience-read/` — downstream-heavy reads for translating author-POV to reader-POV (`explore`)
+- `panel-challenge-belief/` — adversarial pressure on a held belief, holds-up verdict (`review` + lateral personas with a challenge-shaped prompt)
 - `panel-lateral-read/` — surface emergent and cross-cutting effects linear reads miss (`review` + lateral)
 - `panel-minimize-drift/` — the 4-call checkpoint pattern for keeping agentic runs on track
 - `panel-harness/` — full goal → plan → execute lifecycle, phase-sensitive intent selection
@@ -105,6 +103,6 @@ Each demo teaches a different slice. Start there.
 
 ## Limits of this demo
 
-- **One intent shown, one scenario.** `review` is a fine starter but it's not the whole surface. `challenge`, `explore`, `debate` do different jobs.
+- **One scenario, one participant pair.** `review` is a fine starter but it's not the whole surface — see the sibling demos for different branch mixes and prompt shapes.
 - **No orchestration.** This demo is a single call. Real work usually chains calls across phases — see `panel-harness` for that shape.
 - **Persona choice matters more than the example suggests.** The two vantages above happened to converge cleanly on this artifact. A poorly-matched pair can produce two reads that don't meaningfully differ. Pick branches, not just names.

@@ -52,16 +52,12 @@ For a deeper read on a single high-stakes artifact, use `explore` instead (two-s
 3. `python .claude/skills/panel/panel_client.py discover` — see which lateral personas your team has
 4. In Claude Code from this directory, describe the artifact/decision and the system it lives in. The `lateral-read` skill handles the rest.
 
-## Example output
-
-See [`reads/2026-04-22-api-rate-limits.md`](reads/2026-04-22-api-rate-limits.md) — a lateral-heavy read of *"we're adding API rate limits to our public endpoints."* Three reads showing what emerges, what ripples, and what pre-existing pattern quietly breaks — none of which a standard upstream (reliability/cost) or downstream (DX/error UX) read would have caught.
-
 ## Forking this demo
 
 | Type | What it is | When you fork |
 |---|---|---|
 | **Skeleton** (keep) | The skill's two-input shape (artifact + system context); the lateral-heavy participant selection; the read file structure | Copy and keep — this is the pattern |
-| **Scaffolding** (delete) | The worked example; the vendored panel skill if you have it globally | Delete after reading |
+| **Scaffolding** (delete) | The vendored panel skill if you have it globally | Delete after reading |
 | **Pedagogy** (keep, then trim) | The "what lateral catches" list and the three-branches table | Keep while internalizing; compress in your own voice later |
 
 ## Use this when
@@ -74,11 +70,10 @@ See [`reads/2026-04-22-api-rate-limits.md`](reads/2026-04-22-api-rate-limits.md)
 ## Don't use this when
 
 - The question is about the artifact's intrinsic quality — use `review` with upstream for that.
-- The question is about how it lands with a specific audience — use `panel-audience-read` with downstream.
 - You're stress-testing a held belief — use `panel-challenge-belief`.
 - You're looking for a recommendation — lateral reads surface possibility space, not prescriptions. They're inputs to a decision, not decisions.
 
-> The worked example labels attribution by branch vantage (lateral / upstream) rather than by specific persona names. Real panel runs show your own team's persona names in those slots. Run `panel_client.py discover` to see yours. If your team has no lateral personas, that's the adaptation pointed at: add some at panel.humx.ai → Profile → Personas, since without a lateral branch the panel is blind to an entire dimension.
+> Real panel runs show your own team's persona names in each branch slot. Run `panel_client.py discover` to see yours. If your team has no lateral personas, that's the adaptation pointed at: add some at panel.humx.ai → Profile → Personas, since without a lateral branch the panel is blind to an entire dimension.
 
 ## Limits
 
