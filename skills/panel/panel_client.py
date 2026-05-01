@@ -4,14 +4,8 @@ Zero-dependency command-line client for the ``/api/v1/*`` surface.
 
 Subcommands
 -----------
-    setup [HINT]              Onboarding advisor — proposes team / project / defaults
-    help [TOPIC]              Stream advice for a topic (mode / participants / prompt)
-    discover                  List teams, modes, models, and short persona guides
-    ask TOPIC                 Single-persona answer
-    debate TOPIC              2-4 personas in discussion with transcript
-    explore TOPIC             Two-stage panel with synthesis
-    review TOPIC              Parallel upstream reads + main synthesis (progress/alignment)
-    challenge POSITION        Adversarial verdict on a held position
+    setup [HINT]              Discover teams/personas and write panel_state.json
+    call TOPIC                Submit one turn with explicit mode/participants
     balance                   Print wallet balance
     projects list | create    Project management
     state show | set | clear  Inspect/manage the working-directory state file
@@ -40,11 +34,17 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 # ── Configuration ───────────────────────────────────────────────────────────
@@ -54,6 +54,7 @@ DEFAULT_POLL_INTERVAL = 30.0
 DEFAULT_POLL_TIMEOUT = 1200.0
 DEFAULT_POLL_MAX_CONSECUTIVE_FAILURES = 5
 DEFAULT_LLM = "qwen/qwen3-max"
+EXPENSIVE_MODEL_HINTS = ("opus",)
 
 PANEL_STATE_FILENAME = "panel_state.json"
 PANEL_STATE_DIRNAME = ".claude"
@@ -115,9 +116,10 @@ def _env_base_url() -> str:
 def _env_api_key() -> str:
     key = os.environ.get("PANEL_API_KEY", "")
     if not key:
+        base_url = _env_base_url()
         print(
             "error: PANEL_API_KEY is not set.\n"
-            "Generate one at Profile -> API Access, then either:\n"
+            f"Generate one at {base_url}/profile -> API Access, then either:\n"
             "  - export PANEL_API_KEY in your shell, or\n"
             "  - put it in <repo-root>/.env, or\n"
             "  - put it in .env next to this script, or\n"
@@ -131,9 +133,8 @@ def _env_api_key() -> str:
 # ── Panel state file ────────────────────────────────────────────────────────
 #
 # `.claude/panel_state.json` in CWD binds this directory to team + main
-# persona + project + per-intent participants so every subsequent call
-# inherits them. Written by `panel setup` / `projects create --set-active`,
-# read by every intent subcommand.
+# persona + optional project, caches discover output, and records which
+# participants have worked well for broad task categories.
 
 
 def _find_panel_state_path() -> Path:
@@ -168,6 +169,16 @@ def _save_panel_state(patch: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(current, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_panel_state(data: dict) -> Path:
+    path = _find_panel_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     return path
@@ -236,6 +247,20 @@ def _pretty(data) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 
+def _display_value(key: str, value):
+    if key == "short" and value is None:
+        return "Not available"
+    if isinstance(value, dict):
+        return {k: _display_value(k, v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_display_value(key, item) for item in value]
+    return value
+
+
+def _display_state(state: dict) -> dict:
+    return _display_value("", state)
+
+
 # ── API endpoints ──────────────────────────────────────────────────────────
 
 
@@ -302,8 +327,10 @@ def api_submit_turn(
 ) -> dict:
     body: dict = {"participants": participants, "mode": mode, "prompt": prompt}
     if session_id is None:
-        body["team"] = team
-        body["main_persona"] = main_persona
+        if team:
+            body["team"] = team
+        if main_persona:
+            body["main_persona"] = main_persona
     else:
         body["session_id"] = session_id
     if project:
@@ -315,42 +342,6 @@ def api_submit_turn(
         "POST",
         f"{base_url}/api/v1/turn",
         headers=_headers(api_key, idempotency_key),
-        json_body=body,
-        timeout=30,
-    )
-
-
-def api_submit_challenge(
-    base_url: str,
-    api_key: str,
-    *,
-    position: str,
-    evidence: list[str],
-    decision_pending: str | None,
-    team: str,
-    main_persona: str,
-    participants: list[dict],
-    project: str | None,
-    **settings,
-) -> dict:
-    body: dict = {
-        "position": position,
-        "evidence": evidence or [],
-        "team": team,
-        "main_persona": main_persona,
-        "participants": participants,
-    }
-    if decision_pending:
-        body["decision_pending"] = decision_pending
-    if project:
-        body["project"] = project
-    s = _settings_dict(**settings)
-    if s:
-        body["settings"] = s
-    return _request(
-        "POST",
-        f"{base_url}/api/v1/challenge",
-        headers=_headers(api_key),
         json_body=body,
         timeout=30,
     )
@@ -411,13 +402,6 @@ def _stream_ndjson(
     if final is None:
         raise RuntimeError(f"{path} stream closed without a final event")
     return final
-
-
-def api_stream_advise(base_url, api_key, *, topic, on_token=None) -> dict:
-    return _stream_ndjson(
-        base_url, api_key, "/api/v1/advise", {"topic": topic}, "advice",
-        on_token=on_token,
-    )
 
 
 def api_stream_advise_setup(base_url, api_key, *, hint, on_token=None) -> dict:
@@ -509,6 +493,257 @@ def _fetch_shorts(
     return out
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _as_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return []
+
+
+def _participant_ref(raw: str, *, default_branch: str = "main") -> str:
+    raw = raw.strip()
+    if not raw:
+        return ""
+    if ":" in raw:
+        branch, name = raw.split(":", 1)
+        return f"{branch.strip()}:{name.strip()}"
+    return f"{default_branch}:{raw}"
+
+
+def _participants_csv(refs: list[str]) -> str:
+    return ",".join(ref for ref in refs if ref)
+
+
+def _discover_with_shorts(base_url: str, api_key: str) -> dict:
+    data = api_discover(base_url, api_key)
+    teams = data.get("teams", [])
+    unique_names: list[str] = []
+    seen: set[str] = set()
+    for team in teams:
+        for name in team.get("main_personas", []) or []:
+            if name and name not in seen:
+                seen.add(name)
+                unique_names.append(name)
+        for participant in team.get("participants", []) or []:
+            name = participant.get("name")
+            if name and name not in seen:
+                seen.add(name)
+                unique_names.append(name)
+    shorts = _fetch_shorts(base_url, api_key, unique_names) if unique_names else {}
+    return {**data, "shorts": shorts}
+
+
+def _normalize_team_roster(discover: dict) -> dict:
+    teams: dict[str, dict] = {}
+    shorts = discover.get("shorts") or {}
+    for team in discover.get("teams", []) or []:
+        name = team.get("name")
+        if not name:
+            continue
+        main_personas = team.get("main_personas", []) or []
+        personas: list[dict] = []
+        ids: dict[str, str | None] = {}
+        for main_name in main_personas:
+            ref = f"main:{main_name}"
+            ids[ref] = None
+            personas.append({
+                "ref": ref,
+                "id": None,
+                "name": main_name,
+                "branch": "main",
+                "short": shorts.get(main_name),
+            })
+        for p in team.get("participants", []) or []:
+            pname = p.get("name")
+            branch = p.get("branch") or "main"
+            if not pname:
+                continue
+            ref = f"{branch}:{pname}"
+            pid = p.get("id") or p.get("persona_id") or p.get("uuid")
+            ids[ref] = pid
+            personas.append({
+                "ref": ref,
+                "id": pid,
+                "name": pname,
+                "branch": branch,
+                "short": shorts.get(pname),
+                "raw": p,
+            })
+        teams[name] = {
+            "id": team.get("id") or team.get("team_id") or team.get("uuid"),
+            "main_personas": main_personas,
+            "personas": personas,
+            "persona_ids": ids,
+        }
+    return teams
+
+
+def _fallback_participants_for_team(team_state: dict, *, max_count: int = 4) -> list[str]:
+    personas = team_state.get("personas") or []
+    refs = [
+        p.get("ref", "")
+        for p in personas
+        if p.get("branch") in {"upstream", "downstream", "lateral"}
+    ]
+    return [ref for ref in refs if ref][:max_count]
+
+
+def _recommended_participants(setup: dict, teams: dict, team: str, main_persona: str) -> dict:
+    defaults = setup.get("default_participants") or {}
+    team_state = teams.get(team, {})
+    fallback = _fallback_participants_for_team(team_state)
+
+    answer_raw = _as_list(defaults.get("answer"))
+    answer = [_participant_ref(answer_raw[0], default_branch="main")] if answer_raw else []
+    if not answer and main_persona:
+        answer = [f"main:{main_persona}"]
+
+    parallel = [
+        _participant_ref(ref, default_branch="main")
+        for ref in (
+            _as_list(defaults.get("parallel"))
+            or _as_list(defaults.get("panel"))
+            or fallback
+        )
+    ]
+    parallel_with_main = [
+        _participant_ref(ref, default_branch="main")
+        for ref in (
+            _as_list(defaults.get("parallel_with_main"))
+            or _as_list(defaults.get("panel"))
+            or fallback
+        )
+    ]
+
+    return {
+        "answer": answer,
+        "parallel": parallel,
+        "parallel_with_main": parallel_with_main,
+    }
+
+
+def _build_panel_state(setup: dict, discover: dict, existing: dict) -> dict:
+    primary_team = (setup.get("primary_team") or existing.get("team") or "").strip()
+    primary_main = (
+        setup.get("primary_main_persona")
+        or existing.get("main_persona")
+        or ""
+    ).strip()
+    teams = _normalize_team_roster(discover)
+    recommended = _recommended_participants(setup, teams, primary_team, primary_main)
+
+    return {
+        "version": 2,
+        "created_at": existing.get("created_at") or _now_iso(),
+        "updated_at": _now_iso(),
+        "team": primary_team,
+        "main_persona": primary_main,
+        "project": existing.get("project"),
+        "setup": setup,
+        "discover": discover,
+        "teams": teams,
+        "recommended_participants": recommended,
+        "history": existing.get("history") or [],
+        "category_participants": existing.get("category_participants") or {},
+    }
+
+
+def _first_main_persona(discover: dict) -> tuple[str, str] | None:
+    for team in discover.get("teams", []) or []:
+        team_name = (team.get("name") or "").strip()
+        if not team_name:
+            continue
+        for main_name in team.get("main_personas", []) or []:
+            main_name = str(main_name).strip()
+            if main_name:
+                return team_name, main_name
+    return None
+
+
+def _build_discovered_panel_state(discover: dict, existing: dict) -> dict:
+    first = _first_main_persona(discover)
+    if first is None:
+        raise RuntimeError("discover returned no team with a main persona")
+    primary_team, primary_main = first
+    teams = _normalize_team_roster(discover)
+    answer_ref = f"main:{primary_main}"
+
+    return {
+        "version": 2,
+        "created_at": existing.get("created_at") or _now_iso(),
+        "updated_at": _now_iso(),
+        "team": primary_team,
+        "main_persona": primary_main,
+        "project": existing.get("project"),
+        "setup": {"source": "discover"},
+        "discover": discover,
+        "teams": teams,
+        "recommended_participants": {
+            "answer": [answer_ref],
+            "parallel": [],
+            "parallel_with_main": [],
+        },
+        "history": existing.get("history") or [],
+        "category_participants": existing.get("category_participants") or {},
+    }
+
+
+def _discover_default_state(base_url: str, api_key: str, existing: dict) -> dict:
+    discover = api_discover(base_url, api_key)
+    state = _build_discovered_panel_state(discover, existing)
+    _write_panel_state(state)
+    return state
+
+
+def _record_panel_usage(
+    *,
+    category: str,
+    mode: str,
+    participants: list[dict],
+    prompt: str,
+    project: str | None,
+    job_id: str,
+    session_id: str,
+) -> None:
+    state = _load_panel_state()
+    if not state:
+        return
+    refs = [f"{p.get('branch', 'main')}:{p.get('name', '')}" for p in participants]
+    event = {
+        "timestamp": _now_iso(),
+        "category": category,
+        "mode": mode,
+        "participants": refs,
+        "prompt": prompt,
+        "project": project,
+        "job_id": job_id,
+        "session_id": session_id,
+    }
+    history = list(state.get("history") or [])
+    history.append(event)
+    state["history"] = history[-50:]
+
+    categories = dict(state.get("category_participants") or {})
+    previous = categories.get(category) or {}
+    categories[category] = {
+        "mode": mode,
+        "participants": refs,
+        "last_prompt": prompt,
+        "last_used": event["timestamp"],
+        "uses": int(previous.get("uses") or 0) + 1,
+    }
+    state["category_participants"] = categories
+    state["updated_at"] = event["timestamp"]
+    _write_panel_state(state)
+
+
 # ── Rendering ───────────────────────────────────────────────────────────────
 
 
@@ -558,119 +793,54 @@ def _print_turn_result(data: dict) -> None:
         print(f"  {(payload.get('summary') or '').strip()}")
         return
 
-    if kind == "challenge":
-        _print_challenge_payload(payload)
-        return
-
     print("\n(unknown payload kind — raw payload follows)")
     print(_pretty(payload))
 
 
-def _print_challenge_payload(payload: dict) -> None:
-    holds_up = bool(payload.get("holds_up", False))
-    try:
-        conf_str = f"{float(payload.get('confidence', 0.0)):.2f}"
-    except (TypeError, ValueError):
-        conf_str = str(payload.get("confidence", ""))
-    verdict = "HOLDS UP" if holds_up else "DOES NOT HOLD UP"
-    print(f"\nverdict:      {verdict}  (confidence: {conf_str})")
-    objection = (payload.get("strongest_objection") or "").strip()
-    if objection:
-        print(f"\nstrongest objection:\n  {objection}")
-    for label, key in (
-        ("overlooked factors", "overlooked_factors"),
-        ("would change mind if", "would_change_mind_if"),
-    ):
-        items = payload.get(key) or []
-        if items:
-            print(f"\n{label}:")
-            for item in items:
-                print(f"  - {item}")
-    contributions = payload.get("contributions") or []
-    if contributions:
-        print("\n── per-persona objections ──")
-        for c in contributions:
-            print(f"\n[{c.get('persona', '')}]")
-            print(f"  {(c.get('content') or '').strip()}")
+def _setup_advisor_narrative(raw: str) -> str:
+    """Return the human advisor prose before the machine-readable setup block."""
+    if not raw:
+        return ""
+    return raw.split("<setup", 1)[0].strip()
 
 
-def _format_range(source: dict, avg_key: str, fmt: str) -> str:
-    """Render ``avg (range: lo-hi)`` from avg/min/max keys. ``fmt`` wraps values."""
-    avg = source.get(avg_key)
-    if avg is None:
-        return "no data available"
-    lo = source.get(f"{avg_key}_min")
-    hi = source.get(f"{avg_key}_max")
-    if lo is not None and hi is not None and (lo != avg or hi != avg):
-        return f"{fmt.format(avg)} (range: {fmt.format(lo)}-{fmt.format(hi)})"
-    return fmt.format(avg)
+def _persona_shorts_summary(state: dict) -> str | None:
+    seen: set[str] = set()
+    total = 0
+    available = 0
+    for team in (state.get("teams") or {}).values():
+        for persona in team.get("personas") or []:
+            ref = persona.get("ref") or persona.get("name")
+            if not ref or ref in seen:
+                continue
+            seen.add(ref)
+            total += 1
+            if persona.get("short"):
+                available += 1
+    if total == 0:
+        return None
+    if available == 0:
+        return "persona shorts: Not available"
+    if available < total:
+        return f"persona shorts: {available}/{total} available; missing shorts show as Not available"
+    return f"persona shorts: {available}/{total} available"
 
 
-def _print_advice(advice: dict) -> None:
-    print("\n── panel advice ──\n")
-    print(f"suggested mode:          {advice.get('suggested_mode', '')}")
-    parts = advice.get("suggested_participants") or []
-    if parts:
-        print(f"suggested participants:  {', '.join(parts)}")
-    print(f"estimated time:          {_format_range(advice, 'estimated_minutes', '~{} min')}")
-    print(f"estimated cost:          {_format_range(advice, 'estimated_cost_usd', '${} USD')}")
-    if advice.get("use_search_suggested"):
-        print(
-            "web search:              recommended — pass --search on the "
-            "follow-up ask/debate/explore/challenge call."
-        )
-    suggested_prompt = (advice.get("suggested_prompt") or "").strip()
-    if suggested_prompt:
-        print(f"\nreshaped prompt:\n  {suggested_prompt}")
-    rationale = (advice.get("rationale") or "").strip()
-    if rationale:
-        print(f"\nwhy:\n  {rationale}")
-    alternatives = advice.get("alternatives") or []
-    if alternatives:
-        print("\nalternatives:")
-        for alt in alternatives:
-            why = (alt.get("why") or "").strip()
-            print(f"  - {alt.get('mode', '')}: {why}")
-            t = _format_range(alt, "estimated_minutes", "~{} min")
-            c = _format_range(alt, "estimated_cost_usd", "${} USD")
-            print(f"      {t} / {c}")
-
-    suggest = advice.get("suggest_project") or None
-    if not suggest:
-        return
-    state = _load_panel_state()
-    name = suggest.get("name", "")
-    why = (suggest.get("rationale") or "").strip()
-    if state.get("project"):
-        print(
-            f"\n(advisor proposed a project {name!r}, but this directory "
-            f"is already bound to {state.get('project')!r} — ignoring)"
-        )
-        return
-    print("\n── project suggestion ──")
-    print(f"The advisor recommends creating a project: {name!r}")
-    if why:
-        print(f"  why: {why}")
-    print(
-        "\n  To create it and bind this directory, ask the user to confirm,\n"
-        "  then run:\n"
-        f"    panel_client.py projects create {name} --set-active"
-    )
-    print(
-        "\n  Every subsequent panel/challenge call from this directory will\n"
-        "  inherit the project and pick up accumulated memory."
-    )
-
-
-def _print_setup_guide(guide: dict) -> None:
+def _print_setup_guide(guide: dict, *, state: dict | None = None, advisor_text: str = "") -> None:
     overview = (guide.get("overview") or "").strip()
     primary_team = (guide.get("primary_team") or "").strip()
     primary_main = (guide.get("primary_main_persona") or "").strip()
     suggest = guide.get("suggest_project") or None
-    defaults = guide.get("default_participants") or {}
+    narrative = _setup_advisor_narrative(advisor_text)
 
     print("\n── panel setup ──\n")
-    if overview:
+    if narrative:
+        print(narrative)
+        print()
+        if overview and overview not in narrative:
+            print(overview)
+            print()
+    elif overview:
         print(overview)
         print()
 
@@ -680,6 +850,10 @@ def _print_setup_guide(guide: dict) -> None:
 
     print(f"primary team:    {primary_team}")
     print(f"main persona:    {primary_main or '-'}")
+    if state:
+        shorts = _persona_shorts_summary(state)
+        if shorts:
+            print(shorts)
 
     if suggest:
         name = (suggest.get("name") or "").strip()
@@ -688,39 +862,6 @@ def _print_setup_guide(guide: dict) -> None:
             print(f"\nsuggested project:  {name}")
             if why:
                 print(f"  why: {why}")
-
-    intent_defaults = [
-        ("challenge", defaults.get("challenge") or []),
-        ("panel", defaults.get("panel") or []),
-        ("debate", defaults.get("debate") or []),
-    ]
-    answer_p = (defaults.get("answer") or "").strip()
-
-    print("\ndefault participants per intent:")
-    for label, plist in intent_defaults:
-        if plist:
-            print(f"  {label:10} {', '.join(plist)}")
-    if answer_p:
-        print(f"  {'answer':10} {answer_p}")
-
-    print("\n── to apply this setup ──\n")
-    project_name = (suggest.get("name") if suggest else "") or ""
-    if project_name:
-        print(
-            f"  panel_client.py projects create {project_name} "
-            f"--set-active --team {primary_team} --main {primary_main}"
-        )
-    else:
-        print(f"  panel_client.py state set team {primary_team}")
-        print(f"  panel_client.py state set main_persona {primary_main}")
-    for label, plist in intent_defaults:
-        if plist:
-            print(
-                f"  panel_client.py state set {label}_participants "
-                f"\"{','.join(plist)}\""
-            )
-    if answer_p:
-        print(f"  panel_client.py state set answer_persona {answer_p}")
 
 
 # ── Subcommand handlers ─────────────────────────────────────────────────────
@@ -738,14 +879,23 @@ def _parse_participants_csv(raw: str) -> list[dict]:
     return [_parse_participant(p) for p in raw.split(",") if p.strip()]
 
 
-def _check_balance_or_fail(base_url: str, api_key: str, verb: str) -> int | None:
+def _is_expensive_turn(*, mode: str, model: str | None, use_search: bool | None) -> bool:
+    model_name = (model or DEFAULT_LLM).lower()
+    if mode in {"parallel", "parallel_with_main"}:
+        return True
+    if any(hint in model_name for hint in EXPENSIVE_MODEL_HINTS):
+        return True
+    return bool(use_search and any(hint in model_name for hint in EXPENSIVE_MODEL_HINTS))
+
+
+def _check_balance_or_fail(base_url: str, api_key: str, run_label: str) -> int | None:
     """Return non-zero exit code if wallet is zero, else None."""
     try:
         balance = api_balance(base_url, api_key)
         if Decimal(balance.get("balance_usd", "0")) <= 0:
             print(
                 f"error: wallet balance is {balance.get('balance_usd')} — "
-                f"top up before submitting a {verb}.",
+                f"top up before submitting {run_label}.",
                 file=sys.stderr,
             )
             return 3
@@ -754,74 +904,6 @@ def _check_balance_or_fail(base_url: str, api_key: str, verb: str) -> int | None
     except Exception:
         pass  # non-fatal — let the server decide
     return None
-
-
-def cmd_discover(args: argparse.Namespace) -> int:
-    data = api_discover(args.base_url, args.api_key)
-    teams = data.get("teams", [])
-
-    shorts: dict[str, str] = {}
-    if not args.no_shorts:
-        unique_names: list[str] = []
-        seen: set[str] = set()
-        for t in teams:
-            for p in t.get("participants", []):
-                name = p.get("name")
-                if name and name not in seen:
-                    seen.add(name)
-                    unique_names.append(name)
-        if unique_names:
-            shorts = _fetch_shorts(args.base_url, args.api_key, unique_names)
-
-    if args.json:
-        if shorts:
-            data = {**data, "shorts": shorts}
-        print(_pretty(data))
-        return 0
-
-    print(f"teams ({len(teams)}):")
-    for t in teams:
-        print(f"  - {t.get('name')}")
-        main_personas = t.get("main_personas", [])
-        if main_personas:
-            print(f"    main personas: {', '.join(main_personas)}")
-        by_branch: dict[str, list[str]] = {}
-        for p in t.get("participants", []):
-            by_branch.setdefault(p["branch"], []).append(p["name"])
-        for branch in ("upstream", "downstream", "lateral"):
-            names = by_branch.get(branch, [])
-            if names:
-                print(f"    {branch}: {', '.join(names)}")
-    modes = data.get("modes", [])
-    print(f"\nmodes ({len(modes)}):")
-    for m in modes:
-        if isinstance(m, dict):
-            print(f"  - {m['name']} ({m.get('participants', '')} participants)")
-            print(f"    {m.get('description', '')}")
-            print(f"    Best for: {m.get('best_for', '')}")
-        else:
-            print(f"  - {m}")
-    print("\nmodels:")
-    for m in data.get("models", []):
-        print(f"  - {m}")
-    projects = data.get("projects", [])
-    if projects:
-        print(f"\nprojects ({len(projects)}):")
-        for p in projects:
-            print(f"  - {p}")
-    else:
-        print("\nprojects: (none)")
-
-    if not args.no_shorts:
-        if shorts:
-            print(f"\n{'=' * 60}")
-            print(f"persona shorts ({len(shorts)}):")
-            print(f"{'=' * 60}")
-            for name in sorted(shorts):
-                print(f"\n{shorts[name].rstrip()}")
-        else:
-            print("\npersona shorts: (none available — run short forensics to generate)")
-    return 0
 
 
 def cmd_balance(args: argparse.Namespace) -> int:
@@ -877,7 +959,7 @@ def cmd_state_show(args: argparse.Namespace) -> int:
         print(f"no panel state at {path}")
         return 0
     print(f"panel state @ {path}:")
-    for key, value in state.items():
+    for key, value in _display_state(state).items():
         print(f"  {key}: {value}")
     return 0
 
@@ -936,97 +1018,39 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 1
 
 
-# ── Intent dispatcher (ask / debate / explore) ─────────────────────────────
+# ── Unified turn runner ─────────────────────────────────────────────────────
 
 
-def _intent_participants(
-    args: argparse.Namespace, state: dict, intent_key: str,
-) -> str | None:
-    """Precedence: CLI --participants > {intent}_participants > default_participants."""
-    cli = getattr(args, "participants", None)
-    if cli:
-        return cli
-    return state.get(f"{intent_key}_participants") or state.get("default_participants")
+def _state_recommended_participants(state: dict, mode: str) -> list[str]:
+    recommended = state.get("recommended_participants") or {}
+    refs = _as_list(recommended.get(mode))
+    if refs:
+        return refs
+    if mode == "answer" and state.get("main_persona"):
+        return [f"main:{state['main_persona']}"]
+    return []
 
+def _resolve_call_participants(args: argparse.Namespace, state: dict) -> tuple[list[dict], str | None]:
+    raw = getattr(args, "participants", None)
+    if raw:
+        refs = [_participant_ref(part) for part in raw.split(",") if part.strip()]
+    else:
+        refs = _state_recommended_participants(state, args.mode)
 
-def _run_intent(args: argparse.Namespace, *, mode: str, state_key: str) -> int:
-    """Shared handler for ask / debate / explore intents.
+    if args.mode == "answer":
+        if not refs:
+            return [], None
+        first = _parse_participant(refs[0])
+        if first["branch"] != "main":
+            print(
+                "error: answer mode needs one main persona participant "
+                "(for example --participants main:my_persona).",
+                file=sys.stderr,
+            )
+            return [], None
+        return [first], first["name"]
 
-    Resolves team / main / participants / project from CLI args with state
-    fallback, then submits a turn and polls. Single-persona ``ask`` uses
-    its own resolution path (below) before falling through here.
-    """
-    state = _load_panel_state()
-    team = _state_fallback(args, "team", "team")
-    main = _state_fallback(args, "main", "main_persona")
-    participants_raw = _intent_participants(args, state, state_key)
-    project = _state_fallback(args, "project", "project")
-
-    if not team or not main or not participants_raw:
-        print(
-            f"error: {mode} needs --team, --main, and --participants. "
-            "Run `panel_client.py setup` first to bootstrap state, or pass "
-            "them explicitly.",
-            file=sys.stderr,
-        )
-        return 2
-
-    participants = _parse_participants_csv(participants_raw)
-    if not participants:
-        print("error: --participants must be a non-empty comma-separated list.", file=sys.stderr)
-        return 2
-
-    return _submit_turn_and_render(
-        args, team=team, main=main, participants=participants, mode=mode,
-        prompt=args.topic, project=project,
-    )
-
-
-def cmd_ask(args: argparse.Namespace) -> int:
-    """Single-persona answer. Special-cased because the 'persona' doubles
-    as both main persona and the sole participant."""
-    state = _load_panel_state()
-    team = _state_fallback(args, "team", "team")
-    persona = (
-        getattr(args, "persona", None)
-        or state.get("answer_persona")
-        or state.get("main_persona")
-    )
-    project = _state_fallback(args, "project", "project")
-
-    if not team or not persona:
-        print(
-            "error: --team and --persona are required. "
-            "Run `panel_client.py setup` first to bootstrap state, "
-            "or pass them explicitly.",
-            file=sys.stderr,
-        )
-        return 2
-
-    return _submit_turn_and_render(
-        args, team=team, main=persona,
-        participants=[{"name": persona, "branch": "main"}],
-        mode="answer", prompt=args.topic, project=project,
-    )
-
-
-def cmd_debate(args: argparse.Namespace) -> int:
-    return _run_intent(args, mode="discussion", state_key="debate")
-
-
-def cmd_explore(args: argparse.Namespace) -> int:
-    return _run_intent(args, mode="panel", state_key="panel")
-
-
-def cmd_review(args: argparse.Namespace) -> int:
-    """Progress-and-alignment review — upstream personas each give an independent
-    read, main persona synthesizes (parallel_with_main mode).
-
-    Differs from `challenge` (adversarial attack on a position): `review` asks
-    "does this feel like progress to someone modeling the user?" Use it for
-    goal-alignment checks where the attack is not the right question.
-    """
-    return _run_intent(args, mode="parallel_with_main", state_key="review")
+    return _parse_participants_csv(_participants_csv(refs)), None
 
 
 def _submit_turn_and_render(
@@ -1039,13 +1063,26 @@ def _submit_turn_and_render(
     prompt: str,
     project: str | None,
 ) -> int:
-    code = _check_balance_or_fail(args.base_url, args.api_key, "turn")
+    model = getattr(args, "model", None) or DEFAULT_LLM
+    use_search = getattr(args, "use_search", None)
+    expensive = _is_expensive_turn(mode=mode, model=model, use_search=use_search)
+    if expensive and not args.quiet:
+        print("pre-flight balance check for expensive turn...")
+    code = _check_balance_or_fail(
+        args.base_url,
+        args.api_key,
+        "an expensive turn" if expensive else "a turn",
+    )
     if code is not None:
         return code
 
     idem_key = str(uuid.uuid4())
     if not args.quiet:
         print(f"submitting {mode} (idempotency_key={idem_key})")
+
+    memory = getattr(args, "memory", None)
+    if project and memory is None:
+        memory = "basic"
 
     response = api_submit_turn(
         args.base_url,
@@ -1058,10 +1095,10 @@ def _submit_turn_and_render(
         project=project,
         session_id=None,
         idempotency_key=idem_key,
-        model=getattr(args, "model", None) or DEFAULT_LLM,
+        model=model,
         temperature=getattr(args, "temperature", None),
-        memory=getattr(args, "memory", None),
-        use_search=getattr(args, "use_search", None),
+        memory=memory,
+        use_search=use_search,
     )
     job_id = response["job_id"]
     session_id = response["session_id"]
@@ -1069,7 +1106,20 @@ def _submit_turn_and_render(
     if not args.quiet:
         print(f"  job_id:     {job_id}")
         print(f"  session_id: {session_id}")
+        if project:
+            print(f"  project:    {project} (memory={memory})")
         print()
+
+    category = getattr(args, "category", None) or mode
+    _record_panel_usage(
+        category=category,
+        mode=mode,
+        participants=participants,
+        prompt=prompt,
+        project=project,
+        job_id=job_id,
+        session_id=session_id,
+    )
 
     if args.no_poll:
         if args.json:
@@ -1095,124 +1145,131 @@ def _submit_turn_and_render(
     return 0 if final.get("status") == "done" else 1
 
 
-def cmd_challenge(args: argparse.Namespace) -> int:
-    """Adversarial panel on a position the caller holds."""
+def cmd_call(args: argparse.Namespace) -> int:
     state = _load_panel_state()
-    team = _state_fallback(args, "team", "team")
-    main = _state_fallback(args, "main", "main_persona")
-    participants_raw = _intent_participants(args, state, "challenge")
-    project = _state_fallback(args, "project", "project")
+    if (
+        not state
+        and args.mode == "answer"
+        and not getattr(args, "team", None)
+        and not getattr(args, "main", None)
+        and not getattr(args, "participants", None)
+    ):
+        if not args.quiet:
+            print("no panel state found; running lightweight discover for default main persona")
+        try:
+            state = _discover_default_state(args.base_url, args.api_key, state)
+        except (APIError, URLError, RuntimeError) as exc:
+            print(f"error: discover endpoint failed: {exc}", file=sys.stderr)
+            return 1
+        if not args.quiet:
+            print(
+                "  selected: "
+                f"{state.get('team')} / main:{state.get('main_persona')}"
+            )
 
-    if not team or not main or not participants_raw:
+    team = getattr(args, "team", None) or state.get("team")
+    main = getattr(args, "main", None) or state.get("main_persona")
+    project = getattr(args, "project", None) or state.get("project")
+    participants, answer_main = _resolve_call_participants(args, state)
+
+    if args.mode == "answer" and answer_main:
+        main = answer_main
+
+    if not team or not main or not participants:
         print(
-            "error: challenge needs --team, --main, and --participants. "
-            "Run `panel_client.py setup` first to bootstrap state, or pass "
-            "them explicitly.",
+            "error: call needs team, main persona, and participants. "
+            "Run `panel_client.py setup`, let answer mode run lightweight "
+            "discover, or pass --team, --main, and --participants explicitly.",
             file=sys.stderr,
         )
         return 2
 
-    participants = _parse_participants_csv(participants_raw)
-    if not participants:
-        print("error: --participants must be a non-empty comma-separated list.", file=sys.stderr)
-        return 2
-
-    code = _check_balance_or_fail(args.base_url, args.api_key, "challenge")
-    if code is not None:
-        return code
-
-    if not args.quiet:
-        print("submitting challenge")
-        if project:
-            print(f"  project: {project} (memory defaults to expanded)")
-
-    evidence = [e for e in (args.evidence or []) if e.strip()]
-    response = api_submit_challenge(
-        args.base_url,
-        args.api_key,
-        position=args.position,
-        evidence=evidence,
-        decision_pending=args.decision_pending,
+    return _submit_turn_and_render(
+        args,
         team=team,
-        main_persona=main,
+        main=main,
         participants=participants,
+        mode=args.mode,
+        prompt=args.topic,
         project=project,
-        model=args.model,
-        temperature=args.temperature,
-        memory=args.memory,
-        use_search=args.use_search,
     )
-    job_id = response["job_id"]
-    session_id = response.get("session_id", "")
-
-    if not args.quiet:
-        print(f"  job_id:     {job_id}")
-        print(f"  session_id: {session_id}")
-        print()
-
-    if args.no_poll:
-        if args.json:
-            print(_pretty(response))
-        return 0
-
-    if not args.quiet:
-        print("polling for verdict...")
-    final = api_poll_job(
-        args.base_url,
-        args.api_key,
-        job_id,
-        interval=args.poll_interval,
-        timeout=args.timeout,
-        quiet=args.quiet,
-    )
-
-    if args.json:
-        print(_pretty(final))
-    else:
-        _print_turn_result(final)
-    return 0 if final.get("status") == "done" else 1
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
+    if args.create_project and args.no_project:
+        print("error: choose only one of --create-project or --no-project.", file=sys.stderr)
+        return 2
+
+    advisor_tokens: list[str] = []
+
+    def _show_advisor_token(token: str) -> None:
+        advisor_tokens.append(token)
+        print(token, end="", file=sys.stderr, flush=True)
+
     try:
         setup = api_stream_advise_setup(
             args.base_url,
             args.api_key,
             hint=args.hint,
-            on_token=lambda t: print(t, end="", file=sys.stderr, flush=True),
+            on_token=_show_advisor_token,
         )
         print(file=sys.stderr)
     except (URLError, RuntimeError) as exc:
         print(f"error: setup endpoint failed: {exc}", file=sys.stderr)
         return 1
 
-    if args.json:
-        print(_pretty(setup))
-    else:
-        _print_setup_guide(setup)
-    return 0
-
-
-def cmd_help(args: argparse.Namespace) -> int:
-    if not args.topic:
-        print("error: topic is required.", file=sys.stderr)
-        return 2
     try:
-        advice = api_stream_advise(
-            args.base_url,
-            args.api_key,
-            topic=args.topic,
-            on_token=lambda t: print(t, end="", file=sys.stderr, flush=True),
-        )
-        print(file=sys.stderr)
-    except (URLError, RuntimeError) as e:
-        print(f"error: advisor endpoint failed: {e}", file=sys.stderr)
+        discover = _discover_with_shorts(args.base_url, args.api_key)
+    except (APIError, URLError) as exc:
+        print(f"error: discover endpoint failed: {exc}", file=sys.stderr)
         return 1
 
+    existing = _load_panel_state()
+    state = _build_panel_state(setup, discover, existing)
+
+    suggest = setup.get("suggest_project") or {}
+    suggested_name = (args.project_name or suggest.get("name") or "").strip()
+    existing_project = existing.get("project")
+    if existing_project:
+        state["project"] = existing_project
+    elif args.create_project:
+        if not suggested_name:
+            print(
+                "error: setup did not suggest a project name; pass --project-name.",
+                file=sys.stderr,
+            )
+            return 2
+        data = api_create_project(args.base_url, args.api_key, suggested_name)
+        state["project"] = suggested_name
+        state["project_created"] = bool(data.get("created"))
+    elif suggested_name and not args.no_project and sys.stdin.isatty():
+        reply = input(
+            f"Create project {suggested_name!r} to enable panel memory? [y/N] "
+        ).strip().lower()
+        if reply in {"y", "yes"}:
+            data = api_create_project(args.base_url, args.api_key, suggested_name)
+            state["project"] = suggested_name
+            state["project_created"] = bool(data.get("created"))
+    elif args.no_project:
+        state["project"] = None
+
+    path = _write_panel_state(state)
+
     if args.json:
-        print(_pretty(advice))
+        print(_pretty({"path": str(path), "state": state}))
     else:
-        _print_advice(advice)
+        _print_setup_guide(setup, state=state, advisor_text="".join(advisor_tokens))
+        print(f"\nstate written: {path}")
+        if state.get("project"):
+            print(f"project: {state['project']} (future calls pass memory=basic)")
+        elif suggest and suggested_name and not args.no_project:
+            print(
+                "\nproject not created. Ask the user whether to enable panel "
+                "memory, then rerun setup with --create-project or --no-project."
+            )
+        print("\nrecommended participants:")
+        for mode, refs in (state.get("recommended_participants") or {}).items():
+            print(f"  {mode}: {', '.join(refs) if refs else '-'}")
     return 0
 
 
@@ -1233,7 +1290,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_turn_args(parser: argparse.ArgumentParser) -> None:
-    """Flags shared by ask/debate/explore/challenge (excluding participants)."""
+    """Flags shared by unified turn calls."""
     parser.add_argument("--project", help="Active project (inherits from panel state)")
     parser.add_argument(
         "--memory", choices=["basic", "expanded"], default=None,
@@ -1245,7 +1302,7 @@ def _add_turn_args(parser: argparse.ArgumentParser) -> None:
         "--search", dest="use_search", action="store_true", default=None,
         help=(
             "Enable live web search for this turn. Add when the topic needs "
-            "current/external facts; `help` flags it as `use_search_suggested`."
+            "current or external facts."
         ),
     )
     parser.add_argument(
@@ -1267,25 +1324,14 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Set PANEL_API_KEY in your environment or in a .env file next to this "
-            "script. Generate a key at Profile -> API Access.\n\n"
-            "Note for LLM agents: runs can take several minutes (panels and "
-            "discussions up to 10-15 min). Use --no-poll to submit and return "
+            "script. Generate a key at <PANEL_BASE_URL>/profile -> API Access "
+            f"(default: {DEFAULT_BASE_URL}).\n\n"
+            "Note for LLM agents: parallel runs can take several minutes. "
+            "Use --no-poll to submit and return "
             "immediately, then check the result later with `status --job-id <id>`."
         ),
     )
     sub = p.add_subparsers(dest="command", required=True)
-
-    # discover
-    p_disc = sub.add_parser(
-        "discover",
-        help="List teams, modes, models, and short persona forensics",
-    )
-    _add_common_args(p_disc)
-    p_disc.add_argument(
-        "--no-shorts", action="store_true",
-        help="Skip fetching short forensics for each persona (faster)",
-    )
-    p_disc.set_defaults(func=cmd_discover)
 
     # balance
     p_bal = sub.add_parser("balance", help="Print the caller's wallet balance")
@@ -1336,80 +1382,60 @@ def build_parser() -> argparse.ArgumentParser:
     # setup
     p_setup = sub.add_parser(
         "setup",
-        help="Onboarding: propose primary team / project / per-intent defaults",
+        help="Discover teams/personas and write panel_state.json",
     )
     _add_common_args(p_setup)
     p_setup.add_argument(
         "hint", nargs="?", default=None,
         help="Optional one-line context about what you plan to work on.",
     )
+    p_setup.add_argument(
+        "--create-project",
+        action="store_true",
+        help="Create and bind the setup-recommended project for panel memory.",
+    )
+    p_setup.add_argument(
+        "--no-project",
+        action="store_true",
+        help="Write state without creating a project.",
+    )
+    p_setup.add_argument(
+        "--project-name",
+        help="Project name to create when --create-project is passed.",
+    )
     p_setup.set_defaults(func=cmd_setup)
 
-    # help
-    p_help = sub.add_parser(
-        "help",
-        help="Recommend a mode + participants for a topic (fast, no real run)",
+    # call
+    p_call = sub.add_parser(
+        "call",
+        help="Submit a turn with mode answer, parallel, or parallel_with_main",
     )
-    _add_common_args(p_help)
-    p_help.add_argument("topic", help="Topic to explore")
-    p_help.set_defaults(func=cmd_help)
-
-    # ask
-    p_ask = sub.add_parser("ask", help="Quick single-persona take (~1-2 min)")
-    _add_common_args(p_ask)
-    p_ask.add_argument("topic", help="The question/prompt for the persona")
-    p_ask.add_argument("--team", help="Team folder name (inherits from panel state)")
-    p_ask.add_argument(
-        "--persona",
+    _add_common_args(p_call)
+    p_call.add_argument("topic", help="The question/prompt for the panel")
+    p_call.add_argument(
+        "--mode",
+        required=True,
+        choices=["answer", "parallel", "parallel_with_main"],
+        help="API mode to use for this question.",
+    )
+    p_call.add_argument("--team", help="Team folder name (inherits from panel state)")
+    p_call.add_argument("--main", help="Main persona (inherits from panel state)")
+    p_call.add_argument(
+        "--participants",
         help=(
-            "Persona name (inherits from panel state `answer_persona` or "
-            "`main_persona`). Used as both main persona and participant."
+            "Comma-separated persona refs. Use branch:name, e.g. "
+            "main:you,upstream:reviewer,lateral:outsider. Inherits mode "
+            "recommendations from panel state when omitted; no-state answer "
+            "mode can also omit this to discover and use the first main persona."
         ),
     )
-    _add_turn_args(p_ask)
-    p_ask.set_defaults(func=cmd_ask)
-
-    # debate / explore / review share the same arg shape
-    for name, help_text, handler in (
-        ("debate", "Back-and-forth discussion with transcript (~10-15 min)", cmd_debate),
-        ("explore", "Deep multi-perspective synthesis (~12-20 min)", cmd_explore),
-        ("review",  "Progress/alignment review — upstream personas + main synthesis (parallel_with_main) (~8-12 min)", cmd_review),
-    ):
-        parser = sub.add_parser(name, help=help_text)
-        _add_common_args(parser)
-        parser.add_argument("topic", help="The question/prompt for the group")
-        parser.add_argument("--team", help="Team folder name (inherits from panel state)")
-        parser.add_argument("--main", help="Main persona (inherits from panel state)")
-        parser.add_argument(
-            "--participants",
-            help=(
-                "Comma-separated list of personas (e.g. Alice,Bob,upstream:depth_miner). "
-                "Inherits from panel state."
-            ),
-        )
-        _add_turn_args(parser)
-        parser.set_defaults(func=handler)
-
-    # challenge
-    p_chal = sub.add_parser("challenge", help="Adversarial panel on a held position (~8-15 min)")
-    _add_common_args(p_chal)
-    p_chal.add_argument("position", help="The position to stress-test")
-    p_chal.add_argument(
-        "--evidence", action="append", default=[],
-        help="Supporting evidence item (repeat the flag for multiple).",
+    p_call.add_argument(
+        "--category",
+        default=None,
+        help="Task category key used to update panel_state history.",
     )
-    p_chal.add_argument(
-        "--decision-pending", default=None,
-        help="What decision is about to be made based on this position.",
-    )
-    p_chal.add_argument("--team", help="Team folder (inherits from panel state)")
-    p_chal.add_argument("--main", help="Main persona (inherits from panel state)")
-    p_chal.add_argument(
-        "--participants",
-        help="Comma-separated list of personas to attack the position.",
-    )
-    _add_turn_args(p_chal)
-    p_chal.set_defaults(func=cmd_challenge)
+    _add_turn_args(p_call)
+    p_call.set_defaults(func=cmd_call)
 
     return p
 
