@@ -53,7 +53,7 @@ DEFAULT_BASE_URL = "https://panel.humx.ai"
 DEFAULT_POLL_INTERVAL = 30.0
 DEFAULT_POLL_TIMEOUT = 1200.0
 DEFAULT_POLL_MAX_CONSECUTIVE_FAILURES = 5
-DEFAULT_LLM = "qwen/qwen3-max"
+DEFAULT_LLM = "deepseek/deepseek-v4-pro"
 EXPENSIVE_MODEL_HINTS = ("opus",)
 
 PANEL_STATE_FILENAME = "panel_state.json"
