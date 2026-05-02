@@ -9,7 +9,7 @@
     {
       "name": "panel",
       "description": "Harness skill for Companion Panel API v1. Multi-persona analysis: ask, debate, explore, challenge, review.",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "source": "./",
       "author": {
         "name": "humx.ai"
