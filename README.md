@@ -1,5 +1,10 @@
 # Panel Skill
 
+> [!WARNING]
+> This repository is deprecated and Companion Panel will soon be disabled. Companions can now be used via [this plugin](https://github.com/neurowelt/companions).
+
+---
+
 Harness skill that allows easy communication with Companion Panel API v1.
 
 Multi-persona analysis: single-persona answers (`ask`), two-sided debates (`debate`), multi-perspective synthesis (`explore`), and focused reads with main-persona synthesis (`review`). Adversarial pressure on a held position is a `review` with lateral personas and a challenge-shaped prompt — see `examples/panel-challenge-belief/`.
